@@ -1,5 +1,6 @@
 import re
 import shlex
+import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import anyio
@@ -400,7 +401,7 @@ class CloudRunV2Worker(BaseWorker):
         task_status: Optional[anyio.abc.TaskStatus] = None,
     ) -> CloudRunV2WorkerResult:
         """
-        Executes a flow run within a Cloud Run Job and waits for the flow run
+        Executes a flow run within a Cloud Run v2 Job and waits for the flow run
         to complete.
 
         Args:
@@ -538,3 +539,178 @@ class CloudRunV2Worker(BaseWorker):
             return job_execution
         except Exception as exc:
             self._job_run_submission_error(exc, configuration)
+
+    def _watch_job_execution_and_get_result(
+        self,
+        configuration: CloudRunV2WorkerJobConfiguration,
+        client: Resource,
+        execution: ExecutionV2,
+        logger: PrefectLogAdapter,
+        poll_interval: int = 5,
+    ) -> CloudRunV2WorkerResult:
+        """Wait for execution to complete and then return result."""
+        try:
+            job_execution = self._watch_job_execution(
+                client=client,
+                job_execution=execution,
+                timeout=configuration.timeout,
+                poll_interval=poll_interval,
+            )
+        except Exception:
+            logger.exception(
+                "Received an unexpected exception while monitoring Cloud Run Job "
+                f"{configuration.job_name!r}"
+            )
+            raise
+
+        if job_execution.succeeded():
+            status_code = 0
+            logger.info(f"Job Run {configuration.job_name} completed successfully")
+        else:
+            status_code = 1
+            error_msg = job_execution.condition_after_completion()["message"]
+            logger.error(
+                "Job Run {configuration.job_name} did not complete successfully. "
+                f"{error_msg}"
+            )
+
+        logger.info(f"Job Run logs can be found on GCP at: {job_execution.log_uri}")
+
+        if not configuration.keep_job:
+            logger.info(
+                f"Deleting completed Cloud Run Job {configuration.job_name!r} "
+                "from Google Cloud Run..."
+            )
+            try:
+                JobV2.delete(
+                    client=client,
+                    namespace=configuration.project,
+                    job_name=configuration.job_name,
+                )
+            except Exception:
+                logger.exception(
+                    "Received an unexpected exception while attempting to delete Cloud"
+                    f" Run Job {configuration.job_name}"
+                )
+
+        return CloudRunV2WorkerResult(
+            identifier=configuration.job_name,
+            status_code=status_code,
+        )
+
+    @staticmethod
+    def _watch_job_execution(
+        client,
+        job_execution: ExecutionV2,
+        timeout: int,
+        poll_interval: int = 5,
+    ):
+        """
+        Update job_execution status until it is no longer running or timeout is reached.
+        """
+        t0 = time.time()
+        while job_execution.is_running():
+            job_execution = ExecutionV2.get(
+                client=client,
+                execution_name=job_execution.name,
+            )
+
+            elapsed_time = time.time() - t0
+            if timeout is not None and elapsed_time > timeout:
+                raise RuntimeError(
+                    f"Timed out after {elapsed_time}s while waiting for Cloud Run Job "
+                    "execution to complete. Your job may still be running on GCP."
+                )
+
+            time.sleep(poll_interval)
+
+        return job_execution
+
+    @staticmethod
+    def _wait_for_job_creation(
+        client: Resource,
+        configuration: CloudRunV2WorkerJobConfiguration,
+        logger: PrefectLogAdapter,
+        poll_interval: int = 5,
+    ):
+        """Give created job time to register."""
+        job = JobV2.get(
+            client=client,
+            project=configuration.project,
+            location=configuration.region,
+            job_name=configuration.job_name,
+        )
+
+        t0 = time.time()
+        while not job.is_ready():
+            ready_condition = (
+                job.ready_condition
+                if job.ready_condition
+                else "waiting for condition update"
+            )
+            logger.info(f"Job is not yet ready... Current condition: {ready_condition}")
+            job = JobV2.get(
+                client=client,
+                project=configuration.project,
+                location=configuration.region,
+                job_name=configuration.job_name,
+            )
+
+            elapsed_time = time.time() - t0
+            if (
+                configuration.timeout is not None
+                and elapsed_time > configuration.timeout
+            ):
+                raise RuntimeError(
+                    f"Timed out after {elapsed_time}s while waiting for Cloud Run Job "
+                    "execution to complete. Your job may still be running on GCP."
+                )
+
+            time.sleep(poll_interval)
+
+    async def kill_infrastructure(
+        self,
+        infrastructure_pid: str,
+        configuration: CloudRunV2WorkerJobConfiguration,
+        grace_seconds: int = 30,
+    ):
+        """
+        Stops a job for a cancelled flow run based on the provided infrastructure PID
+        and run configuration.
+        """
+        if grace_seconds != 30:
+            self._logger.warning(
+                f"Kill grace period of {grace_seconds}s requested, but GCP does not "
+                "support dynamic grace period configuration. See here for more info: "
+                "https://cloud.google.com/run/docs/reference/rest/v1/namespaces.jobs/delete"  # noqa
+            )
+
+        with self._get_client(configuration) as client:
+            await run_sync_in_worker_thread(
+                self._stop_job,
+                client=client,
+                namespace=configuration.project,
+                job_name=infrastructure_pid,
+            )
+
+    # @staticmethod
+    # def _stop_job(
+    #     client: Resource,
+    #     project: str,
+    #     location: str,
+    #     job_name: str,
+    # ):
+    #     try:
+    #         JobV2.delete(
+    #             client=client,
+    #             project=project,
+    #             location=location,
+    #             job_name=job_name,
+    #         )
+    #     except Exception as exc:
+    #         if "does not exist" in str(exc):
+    #             raise InfrastructureNotFound(
+    #                 f"Cannot stop Cloud Run Job; the job name {job_name!r} "
+    #                 "could not be found."
+    #             ) from exc
+    #         raise
