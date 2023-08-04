@@ -401,7 +401,6 @@ class CloudRunJobV2(BaseCloudRunJob):
         "https://prefecthq.github.io/prefect-gcp/cloud_run/"
         "#prefect_gcp.cloud_run_v2.CloudRunJobV2"
     )  # noqa: E501
-    # ToDo: add this ^
 
     type: Literal["cloud-run-job-v2"] = Field(
         "cloud-run-job-v2",
@@ -437,7 +436,7 @@ class CloudRunJobV2(BaseCloudRunJob):
         title="Launch Stage",
         description=(
             "The launch stage as defined by Google Cloud Platform Launch Stages."
-            "https://cloud.google.com/run/docs/reference/rest/v2/LaunchStage"
+            "https://cloud.google.com/run/docs/reference/rest/v2/LaunchStage."
         ),
     )
     binary_authorization: Optional[Dict] = Field(
@@ -445,7 +444,7 @@ class CloudRunJobV2(BaseCloudRunJob):
         title="Binary Authorization",
         description=(
             "Settings for Binary Authorization feature."
-            "https://cloud.google.com/run/docs/reference/rest/v2/BinaryAuthorization"
+            "https://cloud.google.com/run/docs/reference/rest/v2/BinaryAuthorization."
         ),
     )
     parallelism: Optional[int] = Field(
@@ -491,7 +490,7 @@ class CloudRunJobV2(BaseCloudRunJob):
             "for additional details."
         ),
     )
-    vpc_connector: Optional[str] = Field(
+    vpc_connector_name: Optional[str] = Field(
         default=None,
         title="VPC Connector",
         description=(
@@ -772,9 +771,9 @@ class CloudRunJobV2(BaseCloudRunJob):
             },
         }
 
-        if self.vpc_connector:
+        if self.vpc_connector_name:
             body["template"]["template"]["vpcAccess"] = {
-                "connector": self.vpc_connector,
+                "connector": self.vpc_connector_name,
             }
 
         return body
