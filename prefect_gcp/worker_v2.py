@@ -1,4 +1,3 @@
-import re
 import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -8,18 +7,19 @@ import googleapiclient
 from google.api_core.client_options import ClientOptions
 from googleapiclient import discovery
 from googleapiclient.discovery import Resource
+from prefect.exceptions import InfrastructureNotFound
 from prefect.logging.loggers import PrefectLogAdapter
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
 from prefect.utilities.dockerutils import get_prefect_image_name
 from prefect.utilities.pydantic import JsonPatch
-from prefect.workers.base import (
-    BaseJobConfiguration,
-    BaseVariables,
-    BaseWorker,
-    BaseWorkerResult,
-)
 from pydantic import Field, validator
 
+from prefect_gcp.base_worker import (
+    BaseCloudRunWorker,
+    BaseCloudRunWorkerJobConfiguration,
+    BaseCloudRunWorkerResult,
+    BaseCloudRunWorkerVariables,
+)
 from prefect_gcp.cloud_run_v2 import ExecutionV2, JobV2
 from prefect_gcp.credentials import GcpCredentials
 
@@ -56,9 +56,9 @@ def _get_default_job_body_template() -> Dict[str, Any]:
                     }
                 ],
                 "timeout": "{{ timeout }}",
-                "service_account": "{{ service_account }}",
+                "service_account": "{{ service_account_name }}",
                 "execution_environment": "{{ execution_environment }}",
-                "vpc_access": "{{ vpc_access }}",
+                "vpc_access": "{{ vpc_connector_name }}",
                 "max_retries": "{{ max_retries }}",
             },
         },
@@ -70,21 +70,28 @@ def _get_base_job_body() -> Dict[str, Any]:
     Returns a base job body to use for job body validation.
     """
     return {
-        "name": "{{ name }}",
-        "client": "{{ client }}",
-        "client_version": "{{ client_version }}",
-        "launch_stage": "{{ launch_stage }}",
-        "binary_authorization": "{{ binary_authorization }}",
         "template": {
-            "parallelism": "{{ parallelism }}",
-            "task_count": "{{ task_count }}",
             "template": {"containers": [{}]},
         },
     }
 
 
-class CloudRunV2WorkerJobConfiguration(BaseJobConfiguration):
-    """ToDo"""
+class CloudRunV2WorkerJobConfiguration(BaseCloudRunWorkerJobConfiguration):
+    """
+    Base Configuration class used by the Cloud Run Worker (v2) to create a
+    Cloud Run Job.
+
+    An instance of this class is passed to the Cloud Run worker's `run` method
+    for each flow run. It contains all information necessary to execute
+    the flow run as a Cloud Run Job.
+
+    Attributes:
+        region: The region where the Cloud Run Job resides.
+        credentials: The GCP Credentials used to connect to Cloud Run.
+        job_body: The job body used to create the Cloud Run Job.
+        timeout: The length of time that Prefect will wait for a Cloud Run Job.
+        keep_job: Whether to delete the Cloud Run Job after it completes.
+    """
 
     region: str = Field(
         default="us-central1",
@@ -113,11 +120,6 @@ class CloudRunV2WorkerJobConfiguration(BaseJobConfiguration):
         title="Keep Job After Completion",
         description="Keep the completed Cloud Run Job on Google Cloud Platform.",
     )
-
-    @property
-    def project(self) -> str:
-        """property for accessing the project from the credentials."""
-        return self.credentials.project
 
     @property
     def job_name(self) -> str:
@@ -210,6 +212,9 @@ class CloudRunV2WorkerJobConfiguration(BaseJobConfiguration):
             )
 
     def _format_args_if_present(self):
+        """
+        Formats the arguments if they are present.
+        """
         try:
             args = self.job_body["template"]["template"]["containers"][0].get("args")
             if args is not None and isinstance(args, str):
@@ -254,7 +259,7 @@ class CloudRunV2WorkerJobConfiguration(BaseJobConfiguration):
         return value
 
 
-class CloudRunV2WorkerVariables(BaseVariables):
+class CloudRunV2WorkerVariables(BaseCloudRunWorkerVariables):
     """
     Default variables for the Cloud Run v2 worker.
 
@@ -311,9 +316,9 @@ class CloudRunV2WorkerVariables(BaseVariables):
         title="VPC Connector Name",
         description="The name of the VPC connector to use for the Cloud Run Job.",
     )
-    service_account: Optional[str] = Field(
+    service_account_name: Optional[str] = Field(
         default=None,
-        title="Service Account",
+        title="Service Account Name",
         description="The name of the service account to use for the task execution "
         "of Cloud Run Job. By default Cloud Run jobs run as the default "
         "Compute Engine Service Account. ",
@@ -335,13 +340,13 @@ class CloudRunV2WorkerVariables(BaseVariables):
     )
 
 
-class CloudRunV2WorkerResult(BaseWorkerResult):
+class CloudRunV2WorkerResult(BaseCloudRunWorkerResult):
     """
     Contains information about the final state of a completed process
     """
 
 
-class CloudRunV2Worker(BaseWorker):
+class CloudRunV2Worker(BaseCloudRunWorker):
     """
     Prefect worker that executes flow runs within Cloud Run Jobs.
     """
@@ -356,43 +361,6 @@ class CloudRunV2Worker(BaseWorker):
     _display_name = "Google Cloud Run v2"
     _documentation_url = "https://prefecthq.github.io/prefect-gcp/worker_v2/"
     _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/4SpnOBvMYkHp6z939MDKP6/549a91bc1ce9afd4fb12c68db7b68106/social-icon-google-cloud-1200-630.png?h=250"  # noqa
-
-    def _create_job_error(self, exc, configuration):
-        """Provides a nicer error for 404s when trying to create a Cloud Run Job."""
-        # TODO consider lookup table instead of the if/else,
-        # also check for documented errors
-        if exc.status_code == 404:
-            raise RuntimeError(
-                f"Failed to find resources at {exc.uri}. Confirm that region"
-                f" '{self.region}' is the correct region for your Cloud Run Job and"
-                f" that {configuration.project} is the correct GCP project. If"
-                f" your project ID is not correct, you are using a Credentials block"
-                f" with permissions for the wrong project."
-            ) from exc
-        raise exc
-
-    def _job_run_submission_error(self, exc, configuration):
-        """Provides a nicer error for 404s when submitting job runs."""
-        if exc.status_code == 404:
-            pat1 = r"The requested URL [^ ]+ was not found on this server"
-            # pat2 = (
-            #     r"Resource '[^ ]+' of kind 'JOB' in region '[\w\-0-9]+' "
-            #     r"in project '[\w\-0-9]+' does not exist"
-            # )
-            if re.findall(pat1, str(exc)):
-                raise RuntimeError(
-                    f"Failed to find resources at {exc.uri}. "
-                    f"Confirm that region '{self.region}' is "
-                    f"the correct region for your Cloud Run Job "
-                    f"and that '{configuration.project}' is the "
-                    f"correct GCP project. If your project ID is not "
-                    f"correct, you are using a Credentials "
-                    f"block with permissions for the wrong project."
-                ) from exc
-            else:
-                raise exc
-
-        raise exc
 
     async def run(
         self,
@@ -693,24 +661,27 @@ class CloudRunV2Worker(BaseWorker):
                 job_name=infrastructure_pid,
             )
 
-    # @staticmethod
-    # def _stop_job(
-    #     client: Resource,
-    #     project: str,
-    #     location: str,
-    #     job_name: str,
-    # ):
-    #     try:
-    #         JobV2.delete(
-    #             client=client,
-    #             project=project,
-    #             location=location,
-    #             job_name=job_name,
-    #         )
-    #     except Exception as exc:
-    #         if "does not exist" in str(exc):
-    #             raise InfrastructureNotFound(
-    #                 f"Cannot stop Cloud Run Job; the job name {job_name!r} "
-    #                 "could not be found."
-    #             ) from exc
-    #         raise
+    @staticmethod
+    def _stop_job(
+        client: Resource,
+        project: str,
+        location: str,
+        job_name: str,
+    ):
+        """
+        Stops/Deletes a Cloud Run job.
+        """
+        try:
+            JobV2.delete(
+                client=client,
+                project=project,
+                location=location,
+                job_name=job_name,
+            )
+        except Exception as exc:
+            if "does not exist" in str(exc):
+                raise InfrastructureNotFound(
+                    f"Cannot stop Cloud Run Job; the job name {job_name!r} "
+                    "could not be found."
+                ) from exc
+            raise

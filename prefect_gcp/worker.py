@@ -141,7 +141,6 @@ Read more about configuring work pools
     ```
 """
 
-import re
 import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -157,14 +156,14 @@ from prefect.logging.loggers import PrefectLogAdapter
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
 from prefect.utilities.dockerutils import get_prefect_image_name
 from prefect.utilities.pydantic import JsonPatch
-from prefect.workers.base import (
-    BaseJobConfiguration,
-    BaseVariables,
-    BaseWorker,
-    BaseWorkerResult,
-)
 from pydantic import Field, validator
 
+from prefect_gcp.base_worker import (
+    BaseCloudRunWorker,
+    BaseCloudRunWorkerJobConfiguration,
+    BaseCloudRunWorkerResult,
+    BaseCloudRunWorkerVariables,
+)
 from prefect_gcp.cloud_run import Execution, Job
 from prefect_gcp.credentials import GcpCredentials
 
@@ -241,9 +240,9 @@ def _get_base_job_body() -> Dict[str, Any]:
     }
 
 
-class CloudRunWorkerJobConfiguration(BaseJobConfiguration):
+class CloudRunWorkerJobConfiguration(BaseCloudRunWorkerJobConfiguration):
     """
-    Configuration class used by the Cloud Run Worker to create a Cloud Run Job.
+    Configuration class used by the Cloud Run Worker (v1) to create a Cloud Run Job.
 
     An instance of this class is passed to the Cloud Run worker's `run` method
     for each flow run. It contains all information necessary to execute
@@ -285,13 +284,10 @@ class CloudRunWorkerJobConfiguration(BaseJobConfiguration):
     )
 
     @property
-    def project(self) -> str:
-        """property for accessing the project from the credentials."""
-        return self.credentials.project
-
-    @property
     def job_name(self) -> str:
-        """property for accessing the name from the job metadata."""
+        """
+        Property for accessing the name from the job metadata.
+        """
         return self.job_body["metadata"]["name"]
 
     def prepare_for_flow_run(
@@ -321,16 +317,20 @@ class CloudRunWorkerJobConfiguration(BaseJobConfiguration):
         self._populate_name_if_not_present()
 
     def _populate_envs(self):
-        """Populate environment variables. BaseWorker.prepare_for_flow_run handles
+        """
+        Populate environment variables. BaseWorker.prepare_for_flow_run handles
         putting the environment variables in the `env` attribute. This method
-        moves them into the jobs body"""
+        moves them into the jobs body
+        """
         envs = [{"name": k, "value": v} for k, v in self.env.items()]
         self.job_body["spec"]["template"]["spec"]["template"]["spec"]["containers"][0][
             "env"
         ] = envs
 
     def _populate_name_if_not_present(self):
-        """Adds the flow run name to the job if one is not already provided."""
+        """
+        Adds the flow run name to the job if one is not already provided.
+        """
         try:
             if "name" not in self.job_body["metadata"]:
                 self.job_body["metadata"]["name"] = self.name
@@ -338,7 +338,9 @@ class CloudRunWorkerJobConfiguration(BaseJobConfiguration):
             raise ValueError("Unable to verify name due to invalid job body template.")
 
     def _populate_image_if_not_present(self):
-        """Adds the latest prefect image to the job if one is not already provided."""
+        """
+        Adds the latest prefect image to the job if one is not already provided.
+        """
         try:
             if (
                 "image"
@@ -379,6 +381,9 @@ class CloudRunWorkerJobConfiguration(BaseJobConfiguration):
             )
 
     def _format_args_if_present(self):
+        """
+        Formats the arguments if they are present.
+        """
         try:
             args = self.job_body["spec"]["template"]["spec"]["template"]["spec"][
                 "containers"
@@ -406,7 +411,9 @@ class CloudRunWorkerJobConfiguration(BaseJobConfiguration):
 
     @validator("job_body")
     def _ensure_job_has_compatible_values(cls, value: Dict[str, Any]):
-        """Ensure that the job body has compatible values."""
+        """
+        Ensures that the job body has compatible values.
+        """
         patch = JsonPatch.from_diff(value, _get_base_job_body())
         incompatible = sorted(
             [
@@ -423,7 +430,7 @@ class CloudRunWorkerJobConfiguration(BaseJobConfiguration):
         return value
 
 
-class CloudRunWorkerVariables(BaseVariables):
+class CloudRunWorkerVariables(BaseCloudRunWorkerVariables):
     """
     Default variables for the Cloud Run worker.
 
@@ -504,12 +511,16 @@ class CloudRunWorkerVariables(BaseVariables):
     )
 
 
-class CloudRunWorkerResult(BaseWorkerResult):
-    """Contains information about the final state of a completed process"""
+class CloudRunWorkerResult(BaseCloudRunWorkerResult):
+    """
+    Contains information about the final state of a completed process
+    """
 
 
-class CloudRunWorker(BaseWorker):
-    """Prefect worker that executes flow runs within Cloud Run Jobs."""
+class CloudRunWorker(BaseCloudRunWorker):
+    """
+    Prefect worker that executes flow runs within Cloud Run Jobs.
+    """
 
     type = "cloud-run"
     job_configuration = CloudRunWorkerJobConfiguration
@@ -521,43 +532,6 @@ class CloudRunWorker(BaseWorker):
     _display_name = "Google Cloud Run"
     _documentation_url = "https://prefecthq.github.io/prefect-gcp/worker/"
     _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/4SpnOBvMYkHp6z939MDKP6/549a91bc1ce9afd4fb12c68db7b68106/social-icon-google-cloud-1200-630.png?h=250"  # noqa
-
-    def _create_job_error(self, exc, configuration):
-        """Provides a nicer error for 404s when trying to create a Cloud Run Job."""
-        # TODO consider lookup table instead of the if/else,
-        # also check for documented errors
-        if exc.status_code == 404:
-            raise RuntimeError(
-                f"Failed to find resources at {exc.uri}. Confirm that region"
-                f" '{self.region}' is the correct region for your Cloud Run Job and"
-                f" that {configuration.project} is the correct GCP project. If"
-                f" your project ID is not correct, you are using a Credentials block"
-                f" with permissions for the wrong project."
-            ) from exc
-        raise exc
-
-    def _job_run_submission_error(self, exc, configuration):
-        """Provides a nicer error for 404s when submitting job runs."""
-        if exc.status_code == 404:
-            pat1 = r"The requested URL [^ ]+ was not found on this server"
-            # pat2 = (
-            #     r"Resource '[^ ]+' of kind 'JOB' in region '[\w\-0-9]+' "
-            #     r"in project '[\w\-0-9]+' does not exist"
-            # )
-            if re.findall(pat1, str(exc)):
-                raise RuntimeError(
-                    f"Failed to find resources at {exc.uri}. "
-                    f"Confirm that region '{self.region}' is "
-                    f"the correct region for your Cloud Run Job "
-                    f"and that '{configuration.project}' is the "
-                    f"correct GCP project. If your project ID is not "
-                    f"correct, you are using a Credentials "
-                    f"block with permissions for the wrong project."
-                ) from exc
-            else:
-                raise exc
-
-        raise exc
 
     async def run(
         self,
@@ -606,7 +580,9 @@ class CloudRunWorker(BaseWorker):
             return result
 
     def _get_client(self, configuration: CloudRunWorkerJobConfiguration) -> Resource:
-        """Get the base client needed for interacting with GCP APIs."""
+        """
+        Get the base client needed for interacting with GCP APIs.
+        """
         # region needed for 'v1' API
         api_endpoint = f"https://{configuration.region}-run.googleapis.com"
         gcp_creds = configuration.credentials.get_credentials_from_service_account()
@@ -622,7 +598,9 @@ class CloudRunWorker(BaseWorker):
         client: Resource,
         logger: PrefectLogAdapter,
     ) -> None:
-        """Create a new job wait for it to finish registering."""
+        """
+        Create a new job wait for it to finish registering.
+        """
         try:
             logger.info(f"Creating Cloud Run Job {configuration.job_name}")
 
@@ -666,7 +644,9 @@ class CloudRunWorker(BaseWorker):
         client: Resource,
         logger: PrefectLogAdapter,
     ) -> Execution:
-        """Submit a job run for execution and return the execution object."""
+        """
+        Submit a job run for execution and return the execution object.
+        """
         try:
             logger.info(
                 f"Submitting Cloud Run Job {configuration.job_name!r} for execution."
@@ -695,7 +675,9 @@ class CloudRunWorker(BaseWorker):
         logger: PrefectLogAdapter,
         poll_interval: int = 5,
     ) -> CloudRunWorkerResult:
-        """Wait for execution to complete and then return result."""
+        """
+        Wait for execution to complete and then return result.
+        """
         try:
             job_execution = self._watch_job_execution(
                 client=client,
@@ -776,7 +758,9 @@ class CloudRunWorker(BaseWorker):
         logger: PrefectLogAdapter,
         poll_interval: int = 5,
     ):
-        """Give created job time to register."""
+        """
+        Give created job time to register.
+        """
         job = Job.get(
             client=client,
             namespace=configuration.project,
@@ -835,6 +819,9 @@ class CloudRunWorker(BaseWorker):
             )
 
     def _stop_job(self, client: Resource, namespace: str, job_name: str):
+        """
+        Stops/Deletes a Cloud Run job.
+        """
         try:
             Job.delete(client=client, namespace=namespace, job_name=job_name)
         except Exception as exc:
