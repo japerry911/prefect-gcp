@@ -723,7 +723,8 @@ class CloudRunWorker(BaseCloudRunWorker):
                 )
 
         return CloudRunWorkerResult(
-            identifier=configuration.job_name, status_code=status_code
+            identifier=configuration.job_name,
+            status_code=status_code,
         )
 
     def _watch_job_execution(

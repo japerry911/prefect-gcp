@@ -41,6 +41,7 @@ setup(
     entry_points={
         "prefect.collections": [
             "prefect_gcp = prefect_gcp",
+            "prefect_gcp_worker_v2_test = prefect_gcp.worker_v2",
         ]
     },
     classifiers=[

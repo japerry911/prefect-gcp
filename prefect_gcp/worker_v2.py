@@ -1,6 +1,7 @@
 import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
+from uuid import uuid4
 
 import anyio
 import googleapiclient
@@ -13,6 +14,7 @@ from prefect.utilities.asyncutils import run_sync_in_worker_thread
 from prefect.utilities.dockerutils import get_prefect_image_name
 from prefect.utilities.pydantic import JsonPatch
 from pydantic import Field, validator
+from typing_extensions import Literal
 
 from prefect_gcp.base_worker import (
     BaseCloudRunWorker,
@@ -123,7 +125,12 @@ class CloudRunV2WorkerJobConfiguration(BaseCloudRunWorkerJobConfiguration):
 
     @property
     def job_name(self) -> str:
-        """property for accessing the name from the job metadata."""
+        """
+        Property for accessing the name from the job body.
+
+        Returns:
+            A string, which is the job's name.
+        """
         return self.job_body["name"]
 
     def prepare_for_flow_run(
@@ -154,7 +161,14 @@ class CloudRunV2WorkerJobConfiguration(BaseCloudRunWorkerJobConfiguration):
         self._populate_or_format_command()
         self._format_args_if_present()
         self._populate_image_if_not_present()
-        self._populate_name_if_not_present()
+        self._prepare_timeout()
+
+    def _prepare_timeout(self):
+        """
+        Prepares timeout value to be in correct format (example: 900 => "900s")
+        """
+        timeout_seconds = f"{self.timeout}s"
+        self.job_body["template"]["template"]["timeout"] = timeout_seconds
 
     def _populate_envs(self):
         """
@@ -164,16 +178,6 @@ class CloudRunV2WorkerJobConfiguration(BaseCloudRunWorkerJobConfiguration):
         """
         envs = [{"name": k, "value": v} for k, v in self.env.items()]
         self.job_body["template"]["template"]["containers"][0]["env"] = envs
-
-    def _populate_name_if_not_present(self):
-        """
-        Adds the flow run name to the job if one is not already provided.
-        """
-        try:
-            if "name" not in self.job_body:
-                self.job_body["name"] = self.name
-        except KeyError:
-            raise ValueError("Unable to verify name due to invalid job body template.")
 
     def _populate_image_if_not_present(self):
         """
@@ -228,6 +232,9 @@ class CloudRunV2WorkerJobConfiguration(BaseCloudRunWorkerJobConfiguration):
     def _ensure_job_includes_all_required_components(cls, value: Dict[str, Any]):
         """
         Ensures that the job body includes all required components.
+
+        Args:
+            value: the Job body that is being checked.
         """
         patch = JsonPatch.from_diff(value, _get_base_job_body())
         missing_paths = sorted([op["path"] for op in patch if op["op"] == "add"])
@@ -242,6 +249,9 @@ class CloudRunV2WorkerJobConfiguration(BaseCloudRunWorkerJobConfiguration):
     def _ensure_job_has_compatible_values(cls, value: Dict[str, Any]):
         """
         Ensure that the job body has compatible values.
+
+        Args:
+            value: The Job body being checked.
         """
         patch = JsonPatch.from_diff(value, _get_base_job_body())
         incompatible = sorted(
@@ -311,6 +321,14 @@ class CloudRunV2WorkerVariables(BaseCloudRunWorkerVariables):
         example="512Mi",
         regex=r"^\d+(?:G|Gi|M|Mi)$",
     )
+    launch_stage: Optional[Literal["ALPHA", "BETA", "GA"]] = Field(
+        default="BETA",  # ToDo: Should this be GA, or BETA?
+        title="Launch Stage",
+        description=(
+            "The launch stage as defined by Google Cloud Platform Launch Stages."
+            "https://cloud.google.com/run/docs/reference/rest/v2/LaunchStage."
+        ),
+    )
     vpc_connector_name: Optional[str] = Field(
         default=None,
         title="VPC Connector Name",
@@ -332,7 +350,7 @@ class CloudRunV2WorkerVariables(BaseCloudRunWorkerVariables):
     timeout: Optional[int] = Field(
         default=600,
         gt=0,
-        le=8400,
+        le=86400,
         title="Job Timeout",
         description=(
             "The length of time that Prefect will wait for Cloud Run Job state changes."
@@ -362,6 +380,40 @@ class CloudRunV2Worker(BaseCloudRunWorker):
     _documentation_url = "https://prefecthq.github.io/prefect-gcp/worker_v2/"
     _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/4SpnOBvMYkHp6z939MDKP6/549a91bc1ce9afd4fb12c68db7b68106/social-icon-google-cloud-1200-630.png?h=250"  # noqa
 
+    @staticmethod
+    def _create_job_id(configuration: CloudRunV2WorkerJobConfiguration) -> str:
+        """
+        Creates a Job ID based of image, if that is available, otherwise it generates a
+            random one.
+
+        Args:
+            configuration: The Cloud Run v2 Worker Job Configuration, which will
+                hold image, if it exists.
+        Returns:
+            The newly created Job ID.
+        """
+        image = (
+            configuration.job_body.get("template")
+            .get("template")
+            .get("containers")[0]
+            .get("image")
+        )
+
+        if image is not None:
+            # get `repo` from `gcr.io/<project_name>/repo/other`
+            components = image.split("/")
+            image_name = components[2]
+            # only alphanumeric and '-' allowed for a job name
+            modified_image_name = image_name.replace(":", "-").replace(".", "-")
+            # make 50 char limit for final job name, which will be '<name>-<uuid>'
+            if len(modified_image_name) > 17:
+                modified_image_name = modified_image_name[:17]
+            job_id = f"{modified_image_name}-{uuid4().hex}"
+        else:
+            job_id = f"prefect-{uuid4().hex}"
+
+        return job_id
+
     async def run(
         self,
         flow_run: "FlowRun",
@@ -386,18 +438,22 @@ class CloudRunV2Worker(BaseCloudRunWorker):
         logger = self.get_flow_run_logger(flow_run)
 
         with self._get_client(configuration) as client:
-            await run_sync_in_worker_thread(
+            job_id = await run_sync_in_worker_thread(
                 self._create_job_and_wait_for_registration,
                 configuration,
                 client,
                 logger,
             )
             job_execution = await run_sync_in_worker_thread(
-                self._begin_job_execution, configuration, client, logger
+                self._begin_job_execution,
+                configuration,
+                client,
+                logger,
+                job_id,
             )
 
             if task_status:
-                task_status.started(configuration.job_name)
+                task_status.started(job_id)
 
             result = await run_sync_in_worker_thread(
                 self._watch_job_execution_and_get_result,
@@ -405,6 +461,7 @@ class CloudRunV2Worker(BaseCloudRunWorker):
                 client,
                 job_execution,
                 logger,
+                job_id,
             )
             return result
 
@@ -413,6 +470,8 @@ class CloudRunV2Worker(BaseCloudRunWorker):
         """
         Get the base client needed for interacting with GCP APIs.
 
+        Args:
+            configuration: The Cloud Run v2 Worker Job Configuration.
         Returns:
             A client for interacting with GCP Cloud Run v2 API.
         """
@@ -436,25 +495,39 @@ class CloudRunV2Worker(BaseCloudRunWorker):
         configuration: CloudRunV2WorkerJobConfiguration,
         client: Resource,
         logger: PrefectLogAdapter,
-    ) -> None:
+    ) -> str:
         """
         Create a new job wait for it to finish registering.
+
+        Args:
+            configuration: THe Cloud Run v2 Worker Job Configuration.
+            client: The googleapiclient.discovery Resource for Cloud Run v2 API.
+            logger: The Prefect Logger.
+        Returns:
+            The Job ID that is created in conjunction with the creation of the Job.
         """
+        job_id = self._create_job_id(configuration=configuration)
+
         try:
-            logger.info(f"Creating Cloud Run Job {configuration.job_name}")
+            logger.info(f"Creating Cloud Run Job {job_id}")
 
             JobV2.create(
                 client=client,
                 project=configuration.credentials.project,
                 location=configuration.region,
+                job_id=job_id,
                 body=configuration.job_body,
             )
+
         except googleapiclient.errors.HttpError as exc:
             self._create_job_error(exc, configuration)
 
         try:
             self._wait_for_job_creation(
-                client=client, configuration=configuration, logger=logger
+                client=client,
+                configuration=configuration,
+                logger=logger,
+                job_id=job_id,
             )
         except Exception:
             logger.exception(
@@ -462,41 +535,49 @@ class CloudRunV2Worker(BaseCloudRunWorker):
             )
             if not configuration.keep_job:
                 logger.info(
-                    f"Deleting Cloud Run Job {configuration.job_name} from "
-                    "Google Cloud Run."
+                    f"Deleting Cloud Run Job {job_id} from " "Google Cloud Run."
                 )
                 try:
                     JobV2.delete(
                         client=client,
                         project=configuration.credentials.project,
                         location=configuration.region,
-                        job_name=configuration.job_name,
+                        job_name=job_id,
                     )
                 except Exception:
                     logger.exception(
                         "Received an unexpected exception while attempting to delete"
-                        f" Cloud Run Job {configuration.job_name!r}"
+                        f" Cloud Run Job {job_id!r}"
                     )
             raise
+
+        return job_id
 
     def _begin_job_execution(
         self,
         configuration: CloudRunV2WorkerJobConfiguration,
         client: Resource,
         logger: PrefectLogAdapter,
+        job_id: str,
     ) -> ExecutionV2:
         """
         Submit a job run for execution and return the execution object.
+
+        Args:
+            configuration: THe Cloud Run v2 Worker Job Configuration.
+            client: The googleapiclient.discovery Resource for Cloud Run v2 API.
+            logger: The Prefect Logger.
+            job_id: The Job ID for the Job that is beginning execution.
+        Returns:
+             The Job Execution object of the running Job.
         """
         try:
-            logger.info(
-                f"Submitting Cloud Run Job {configuration.job_name!r} for execution."
-            )
+            logger.info(f"Submitting Cloud Run Job {job_id!r} for execution.")
             submission = JobV2.run(
                 client=client,
                 project=configuration.credentials.project,
                 location=configuration.region,
-                job_name=configuration.job_name,
+                job_name=job_id,
             )
 
             job_execution = ExecutionV2.get(
@@ -514,9 +595,22 @@ class CloudRunV2Worker(BaseCloudRunWorker):
         client: Resource,
         execution: ExecutionV2,
         logger: PrefectLogAdapter,
+        job_id: str,
         poll_interval: int = 5,
     ) -> CloudRunV2WorkerResult:
-        """Wait for execution to complete and then return result."""
+        """
+        Wait for execution to complete and then return result.
+
+        Args:
+            configuration: THe Cloud Run v2 Worker Job Configuration.
+            client: The googleapiclient.discovery Resource for Cloud Run v2 API.
+            execution: The running Job's Execution object.
+            logger: The Prefect Logger.
+            job_id: The running Job's Job ID.
+            poll_interval: The polling interval for watching the Job's Execution.
+        Returns:
+            The Cloud Run v2 Worker Result of the finished Job.
+        """
         try:
             job_execution = self._watch_job_execution(
                 client=client,
@@ -527,42 +621,40 @@ class CloudRunV2Worker(BaseCloudRunWorker):
         except Exception:
             logger.exception(
                 "Received an unexpected exception while monitoring Cloud Run Job "
-                f"{configuration.job_name!r}"
+                f"{job_id!r}"
             )
             raise
 
         if job_execution.succeeded():
             status_code = 0
-            logger.info(f"Job Run {configuration.job_name} completed successfully")
+            logger.info(f"Job Run {job_id} completed successfully")
         else:
             status_code = 1
-            error_msg = job_execution.condition_after_completion()["message"]
-            logger.error(
-                "Job Run {configuration.job_name} did not complete successfully. "
-                f"{error_msg}"
-            )
+            error_msg = job_execution.condition_after_completion().get("message")
+            logger.error(f"Job Run {job_id} did not complete successfully. {error_msg}")
 
         logger.info(f"Job Run logs can be found on GCP at: {job_execution.log_uri}")
 
         if not configuration.keep_job:
             logger.info(
-                f"Deleting completed Cloud Run Job {configuration.job_name!r} "
+                f"Deleting completed Cloud Run Job {job_id!r} "
                 "from Google Cloud Run..."
             )
             try:
                 JobV2.delete(
                     client=client,
-                    namespace=configuration.project,
-                    job_name=configuration.job_name,
+                    project=configuration.project,
+                    location=configuration.region,
+                    job_name=job_id,
                 )
             except Exception:
                 logger.exception(
                     "Received an unexpected exception while attempting to delete Cloud"
-                    f" Run Job {configuration.job_name}"
+                    f" Run Job {job_id}"
                 )
 
         return CloudRunV2WorkerResult(
-            identifier=configuration.job_name,
+            identifier=job_id,
             status_code=status_code,
         )
 
@@ -575,6 +667,13 @@ class CloudRunV2Worker(BaseCloudRunWorker):
     ):
         """
         Update job_execution status until it is no longer running or timeout is reached.
+
+        Args:
+            client: The googleapiclient.discovery Resource for Cloud Run v2 API.
+            job_execution: The Execution object of Job that is being watched.
+            timeout: The total time that the Job has to complete before an exception
+                is raised.
+            poll_interval: The polling interval between status checks on the Job.
         """
         t0 = time.time()
         while job_execution.is_running():
@@ -594,26 +693,36 @@ class CloudRunV2Worker(BaseCloudRunWorker):
 
         return job_execution
 
-    @staticmethod
     def _wait_for_job_creation(
+        self,
         client: Resource,
         configuration: CloudRunV2WorkerJobConfiguration,
         logger: PrefectLogAdapter,
+        job_id: str,
         poll_interval: int = 5,
     ):
-        """Give created job time to register."""
+        """
+        Give created job time to register.
+
+        Args:
+            configuration: THe Cloud Run v2 Worker Job Configuration.
+            client: The googleapiclient.discovery Resource for Cloud Run v2 API.
+            logger: The Prefect Logger.
+            job_id: The Job ID of the Job being waiting to be created.
+            poll_interval: The polling interval between checking the creation status.
+        """
         job = JobV2.get(
             client=client,
             project=configuration.project,
             location=configuration.region,
-            job_name=configuration.job_name,
+            job_name=job_id,
         )
 
         t0 = time.time()
         while not job.is_ready():
             ready_condition = (
-                job.ready_condition
-                if job.ready_condition
+                job.get_ready_condition()
+                if job.get_ready_condition()  # ToDo: add walrus operator?
                 else "waiting for condition update"
             )
             logger.info(f"Job is not yet ready... Current condition: {ready_condition}")
@@ -621,7 +730,7 @@ class CloudRunV2Worker(BaseCloudRunWorker):
                 client=client,
                 project=configuration.project,
                 location=configuration.region,
-                job_name=configuration.job_name,
+                job_name=job_id,
             )
 
             elapsed_time = time.time() - t0
@@ -645,19 +754,26 @@ class CloudRunV2Worker(BaseCloudRunWorker):
         """
         Stops a job for a cancelled flow run based on the provided infrastructure PID
         and run configuration.
+
+        Args:
+            infrastructure_pid: The Infrastructure PID, which in this case is the
+                Job's Name.
+            configuration: THe Cloud Run v2 Worker Job Configuration.
+            grace_seconds: Not Implemented Currently due to GCP not supporting dynamic
+                grace period configuration.
         """
         if grace_seconds != 30:
             self._logger.warning(
                 f"Kill grace period of {grace_seconds}s requested, but GCP does not "
-                "support dynamic grace period configuration. See here for more info: "
-                "https://cloud.google.com/run/docs/reference/rest/v1/namespaces.jobs/delete"  # noqa
+                "support dynamic grace period configuration"
             )
 
         with self._get_client(configuration) as client:
             await run_sync_in_worker_thread(
                 self._stop_job,
                 client=client,
-                namespace=configuration.project,
+                project=configuration.project,
+                location=configuration.region,
                 job_name=infrastructure_pid,
             )
 
@@ -670,6 +786,12 @@ class CloudRunV2Worker(BaseCloudRunWorker):
     ):
         """
         Stops/Deletes a Cloud Run job.
+
+        Args:
+            client: The googleapiclient.discovery Resource for Cloud Run v2 API.
+            project: The GCP Project of the Job.
+            location: The GCP Region Location of the Job being stopped.
+            job_name: THe Job Name of the Job being stopped.
         """
         try:
             JobV2.delete(

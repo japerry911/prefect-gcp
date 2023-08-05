@@ -78,17 +78,6 @@ class TestCloudRunV2WorkerJobConfiguration:
 
         assert container["image"] == image
 
-    def test_populate_name_if_not_present(self, cloud_run_v2_worker_job_config):
-        assert "name" not in cloud_run_v2_worker_job_config.job_body
-
-        cloud_run_v2_worker_job_config._populate_name_if_not_present()
-
-        assert "name" in cloud_run_v2_worker_job_config.job_body
-        assert (
-            cloud_run_v2_worker_job_config.job_body["name"]
-            == cloud_run_v2_worker_job_config.name
-        )
-
     def test_populate_or_format_command_doesnt_exist(
         self,
         cloud_run_v2_worker_job_config,
@@ -140,20 +129,6 @@ class TestCloudRunV2WorkerJobConfiguration:
         cloud_run_v2_worker_job_config._format_args_if_present()
 
         assert "args" not in container
-
-    def test_populate_name_doesnt_overwrite(
-        self,
-        cloud_run_v2_worker_job_config,
-        flow_run,
-    ):
-        name = "my-name"
-        cloud_run_v2_worker_job_config.job_body["name"] = name
-
-        cloud_run_v2_worker_job_config._populate_name_if_not_present()
-
-        assert "name" in cloud_run_v2_worker_job_config.job_body
-        assert cloud_run_v2_worker_job_config.job_body["name"] != flow_run.name
-        assert cloud_run_v2_worker_job_config.job_body["name"] == name
 
     async def test_validates_against_an_empty_job_body(self):
         template = CloudRunV2Worker.get_default_base_job_template()

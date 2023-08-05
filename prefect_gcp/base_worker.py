@@ -58,6 +58,11 @@ class BaseCloudRunWorkerJobConfiguration(BaseJobConfiguration, ABC):
         Ensures that necessary values are present in the job body and that the
         job body is valid.
         """
+        super().prepare_for_flow_run(
+            flow_run=flow_run,
+            deployment=deployment,
+            flow=flow,
+        )
 
     @abstractmethod
     def _populate_envs(self):
@@ -65,12 +70,6 @@ class BaseCloudRunWorkerJobConfiguration(BaseJobConfiguration, ABC):
         Populate environment variables. BaseWorker.prepare_for_flow_run handles
         putting the environment variables in the `env` attribute. This method
         moves them into the jobs body
-        """
-
-    @abstractmethod
-    def _populate_name_if_not_present(self):
-        """
-        Adds the flow run name to the job if one is not already provided.
         """
 
     @abstractmethod
