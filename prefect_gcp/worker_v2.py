@@ -321,6 +321,13 @@ class CloudRunV2WorkerVariables(BaseCloudRunWorkerVariables):
         example="512Mi",
         regex=r"^\d+(?:G|Gi|M|Mi)$",
     )
+    max_retries: Optional[int] = Field(
+        default=1,
+        title="Max Retries",
+        description=(
+            "Number of retries allowed per Task, before marking this Task failed."
+        ),
+    )
     launch_stage: Optional[Literal["ALPHA", "BETA", "GA"]] = Field(
         default="BETA",  # ToDo: Should this be GA, or BETA?
         title="Launch Stage",
