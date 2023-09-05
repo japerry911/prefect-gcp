@@ -37,8 +37,8 @@ def _get_default_job_body_template() -> Dict[str, Any]:
     """
     return {
         "name": "{{ name }}",
-        "client": "{{ client }}",
-        "client_version": "{{ client_version }}",
+        # "client": "{{ client }}",
+        # "client_version": "{{ client_version }}",
         "launch_stage": "{{ launch_stage }}",
         "binary_authorization": "{{ binary_authorization }}",
         "template": {
@@ -59,7 +59,7 @@ def _get_default_job_body_template() -> Dict[str, Any]:
                 ],
                 "timeout": "{{ timeout }}",
                 "service_account": "{{ service_account }}",
-                "execution_environment": "{{ execution_environment }}",
+                # "execution_environment": "{{ execution_environment }}",
                 "vpc_access": "{{ vpc_connector_name }}",
                 "max_retries": "{{ max_retries }}",
             },
@@ -348,6 +348,36 @@ class CloudRunV2WorkerVariables(BaseCloudRunWorkerVariables):
         "of Cloud Run Job. By default Cloud Run jobs run as the default "
         "Compute Engine Service Account. ",
         example="service-account@example.iam.gserviceaccount.com",
+    )
+    binary_authorization: Optional[Dict] = Field(
+        default={},
+        title="Binary Authorization",
+        description=(
+            "Settings for Binary Authorization feature."
+            "https://cloud.google.com/run/docs/reference/rest/v2/BinaryAuthorization."
+        ),
+    )
+    parallelism: Optional[int] = Field(
+        default=1,
+        title="Parallelism",
+        description=(
+            "Specifies the maximum desired number of tasks the execution should "
+            "run at given time. Must be <= taskCount. When the job is run, if "
+            "this field is 0 or unset, the maximum possible value will be used for "
+            "that execution. The actual number of tasks running in steady state "
+            "will be less than this number when there are fewer tasks waiting to "
+            "be completed remaining, i.e. when the work left to do is less than "
+            "max parallelism."
+        ),
+    )
+    task_count: Optional[int] = Field(
+        default=1,
+        title="Task Count",
+        description=(
+            "Specifies the desired number of tasks the execution should run. "
+            "Setting to 1 means that parallelism is limited to 1 and the success "
+            "of that task signals the success of the execution. Defaults to 1."
+        ),
     )
     keep_job: Optional[bool] = Field(
         default=False,
