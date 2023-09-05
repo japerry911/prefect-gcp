@@ -58,7 +58,7 @@ def _get_default_job_body_template() -> Dict[str, Any]:
                     }
                 ],
                 "timeout": "{{ timeout }}",
-                "service_account": "{{ service_account_name }}",
+                "service_account": "{{ service_account }}",
                 "execution_environment": "{{ execution_environment }}",
                 "vpc_access": "{{ vpc_connector_name }}",
                 "max_retries": "{{ max_retries }}",
@@ -341,7 +341,7 @@ class CloudRunV2WorkerVariables(BaseCloudRunWorkerVariables):
         title="VPC Connector Name",
         description="The name of the VPC connector to use for the Cloud Run Job.",
     )
-    service_account_name: Optional[str] = Field(
+    service_account: Optional[str] = Field(
         default=None,
         title="Service Account Name",
         description="The name of the service account to use for the task execution "
