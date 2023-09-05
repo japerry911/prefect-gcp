@@ -37,8 +37,6 @@ def _get_default_job_body_template() -> Dict[str, Any]:
     """
     return {
         "name": "{{ name }}",
-        # "client": "{{ client }}",
-        # "client_version": "{{ client_version }}",
         "launch_stage": "{{ launch_stage }}",
         "binary_authorization": "{{ binary_authorization }}",
         "template": {
@@ -59,7 +57,6 @@ def _get_default_job_body_template() -> Dict[str, Any]:
                 ],
                 "timeout": "{{ timeout }}",
                 "service_account": "{{ service_account }}",
-                # "execution_environment": "{{ execution_environment }}",
                 "vpc_access": "{{ vpc_connector_name }}",
                 "max_retries": "{{ max_retries }}",
             },
