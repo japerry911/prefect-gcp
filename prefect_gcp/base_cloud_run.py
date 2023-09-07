@@ -145,18 +145,6 @@ class BaseCloudRunJob(Infrastructure, ABC):
 
         return self._job_name
 
-    @property
-    def memory_string(self):
-        """
-        Generates a Memory string and returns it.
-
-        Returns:
-            A property formatted memory string for Cloud Run API Run Job.
-        """
-        if self.memory and self.memory_unit:
-            return str(self.memory) + self.memory_unit
-        return None
-
     @validator("image", check_fields=False)
     def _remove_image_spaces(cls, value: Optional[str]) -> str or None:
         """

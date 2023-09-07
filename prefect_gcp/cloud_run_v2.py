@@ -539,6 +539,18 @@ class CloudRunJobV2(BaseCloudRunJob):
     _job_name: str = None
     _execution: Optional[ExecutionV2] = None
 
+    @property
+    def memory_string(self):
+        """
+        Generates a Memory string and returns it.
+
+        Returns:
+            A property formatted memory string for Cloud Run API Run Job.
+        """
+        if self.memory and self.memory_unit:
+            return str(self.memory) + self.memory_unit
+        return None
+
     def _add_resources(self) -> Dict:
         """
         Sets specified resources limits for a Cloud Run Job.
