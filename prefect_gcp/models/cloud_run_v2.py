@@ -1,9 +1,13 @@
+import json
 import time
 from typing import Dict, List, Literal, Optional
+
+from anyio.abc import TaskStatus
 
 # noinspection PyProtectedMember
 from googleapiclient.discovery import Resource
 from prefect.infrastructure.base import Infrastructure, InfrastructureResult
+from prefect.utilities.asyncutils import run_sync_in_worker_thread, sync_compatible
 from pydantic import VERSION as PYDANTIC_VERSION
 
 if PYDANTIC_VERSION.startswith("2."):
@@ -505,3 +509,55 @@ class CloudRunJobV2(Infrastructure):
 
     _job_name: str = None
     _execution: Optional[ExecutionV2] = None
+
+    @sync_compatible
+    async def run(
+        self,
+        task_status: Optional[TaskStatus] = None,
+    ) -> CloudRunJobV2Result:
+        with self._get_client() as cr_client:
+            await run_sync_in_worker_thread(
+                self._create_job_and_wait_for_registration,
+                cr_client=cr_client,
+            )
+
+            self._execution = await run_sync_in_worker_thread(
+                self._begin_job_execution,
+                cr_client=cr_client,
+            )
+
+            if task_status:
+                task_status.started(self.job_name)
+
+            result = await run_sync_in_worker_thread(
+                self._watch_job_execution_and_get_result,
+                cr_client=cr_client,
+                execution=self._execution,
+                poll_interval=5,
+            )
+
+            return result
+
+    def preview(self, redact_values: bool = True) -> str:
+        """
+        Return a preview of the Cloud Run Job V2.
+
+        Args:
+            redact_values (bool): Whether to redact values in the preview from the env.
+
+        Returns:
+            A preview of the Cloud Run Job V2 .
+        """
+        body = self._job_body()
+
+        env = body["template"]["template"]["containers"][0]["env"]
+
+        body["template"]["template"]["containers"][0]["env"] = [
+            {
+                "name": e["name"],
+                "value": "REDACTED",
+            }
+            for e in env
+        ]
+
+        return json.dumps(body, indent=4)
