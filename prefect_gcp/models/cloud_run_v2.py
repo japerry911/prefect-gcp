@@ -3,13 +3,15 @@ from typing import Dict, List, Literal, Optional
 
 # noinspection PyProtectedMember
 from googleapiclient.discovery import Resource
-from prefect.infrastructure.base import InfrastructureResult
+from prefect.infrastructure.base import Infrastructure, InfrastructureResult
 from pydantic import VERSION as PYDANTIC_VERSION
 
 if PYDANTIC_VERSION.startswith("2."):
-    from pydantic.v1 import BaseModel
+    from pydantic.v1 import BaseModel, Field
 else:
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
+
+from prefect_gcp.credentials import GcpCredentials
 
 
 class JobV2(BaseModel):
@@ -391,3 +393,115 @@ class ExecutionV2(BaseModel):
 
 class CloudRunJobV2Result(InfrastructureResult):
     """Result from a Cloud Run Job."""
+
+
+class CloudRunJobV2(Infrastructure):
+    """
+    CloudRunJobV2 is a Prefect Infrastructure for running a job on Cloud Run with
+        the V2 API.
+    """
+
+    _block_type_slug = "cloud-run-job-v2"
+    _block_type_name = "GCP Cloud Run Job V2"
+    _description = "Infrastructure block used to run GCP Cloud Run Jobs (V2 API). Note this block is experimental. The interface may change without notice."  # noqa
+    _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/4CD4wwbiIKPkZDt4U3TEuW/c112fe85653da054b6d5334ef662bec4/gcp.png?h=250"  # noqa: E501
+    _documentation_url = "https://prefecthq.github.io/prefect-gcp/cloud_run/#prefect_gcp.cloud_run_v2.CloudRunJobV2"  # noqa: E501
+
+    type: Literal["cloud-run-job-v2"] = Field(
+        "cloud-run-job-v2",
+        description="The slug for this task type. Must be `cloud-run-job-v2`.",
+    )
+
+    credentials: GcpCredentials  # cannot be a field; else it shows as JSON in UI
+    region: str = Field(
+        ...,
+        description="The region to run the Cloud Run Job V2 in.",
+    )
+    image: str = Field(
+        ...,
+        description=(
+            "The image to use for a new Cloud Run Job V2. This value must "
+            "refer to an image within either Google Container Registry "
+            "or Google Artifact Registry, like `gcr.io/<project_name>/<repo>/`."
+        ),
+    )
+    args: Optional[List[str]] = Field(
+        default_factory=list,
+        description=(
+            "The arguments to pass to the Cloud Run Job V2's entrypoint command."
+        ),
+    )
+    env: Dict[str, str] = Field(
+        default_factory=dict,
+        description="The environment variables to pass to the Cloud Run Job V2.",
+    )
+    labels: Dict[str, str] = Field(
+        default_factory=dict,
+        description="The labels to pass to the Cloud Run Job V2.",
+    )
+    keep_job: Optional[bool] = Field(
+        default=False,
+        title="Keep Job after Completion",
+        description=(
+            "Whether to keep the Cloud Run Job V2 after it is completed. "
+            "If False, the Cloud Run Job V2 will be deleted after completion."
+        ),
+    )
+    launch_stage: Literal[
+        "ALPHA",
+        "BETA",
+        "GA",
+        "DEPRECATED",
+        "EARLY_ACCESS",
+        "PRELAUNCH",
+        "UNIMPLEMENTED",
+        "LAUNCH_TAG_UNSPECIFIED",
+    ] = Field(
+        "GA",
+        description=(
+            "The launch stage of the Cloud Run Job V2. "
+            "See https://cloud.google.com/run/docs/about-features-categories "
+            "for additional details."
+        ),
+    )
+    max_retries: Optional[int] = Field(
+        default=0,
+        description="The maximum number of times to retry the Cloud Run Job V2.",
+    )
+    cpu: Optional[str] = Field(
+        default="1",
+        title="CPU",
+        description=(
+            "The amount of CPU allocated to the Cloud Run Job V2. "
+            "The int must be valid based on the rules specified at "
+            "https://cloud.google.com/run/docs/configuring/cpu#setting-jobs ."
+        ),
+    )
+    memory: Optional[str] = Field(
+        default=None,
+        title="Memory",
+        description=(
+            "The memory to allocate to the Cloud Run job along with the units, which"
+            "could be: G, Gi, M, Mi."
+        ),
+        example="512Mi",
+        pattern=r"^\d+(?:G|Gi|M|Mi)$",
+    )
+    timeout: Optional[int] = Field(
+        default=600,
+        gt=0,
+        le=86400,
+        title="Job Timeout",
+        description=(
+            "The length of time that Prefect will wait for a Cloud Run Job to "
+            "complete before raising an exception (maximum of 86400 seconds, 1 day)."
+        ),
+    )
+    vpc_connector_name: Optional[str] = Field(
+        default=None,
+        title="VPC Connector Name",
+        description="The name of the VPC connector to use for the Cloud Run Job V2.",
+    )
+
+    _job_name: str = None
+    _execution: Optional[ExecutionV2] = None
